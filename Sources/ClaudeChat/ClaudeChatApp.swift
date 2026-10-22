@@ -21,16 +21,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ClaudeChatApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var store = ChatStore()
+    @State private var rebuilder = Rebuilder()
 
     var body: some Scene {
         WindowGroup("Claude", id: "main") {
             ContentView()
                 .environment(store)
+                .environment(rebuilder)
                 .frame(minWidth: 760, minHeight: 520)
         }
         .commands {
             ChatCommands(store: store)
             AppearanceCommands()
+            RebuildCommands(rebuilder: rebuilder)
         }
 
         MenuBarExtra {
@@ -44,6 +47,7 @@ struct ClaudeChatApp: App {
         Settings {
             SettingsView()
                 .environment(store)
+                .environment(rebuilder)
         }
     }
 }

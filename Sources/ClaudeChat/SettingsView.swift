@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 struct SettingsView: View {
     @Environment(ChatStore.self) private var store
+    @Environment(Rebuilder.self) private var rebuilder
     @State private var keyDraft = ""
     @State private var keyNameDraft = ""
     @State private var keyToRemove: APIKeyProfile?
@@ -123,6 +124,33 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section {
+                LabeledContent("Source folder") {
+                    HStack {
+                        Text(rebuilder.sourcePath)
+                            .font(.callout.monospaced())
+                            .foregroundStyle(rebuilder.hasSource ? Color.secondary : Color.red)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                        Button("Choose…") { rebuilder.chooseFolder() }
+                    }
+                }
+                HStack {
+                    Button("Rebuild & Reinstall") { rebuilder.rebuild() }
+                        .disabled(rebuilder.isBuilding || !rebuilder.hasSource)
+                    if rebuilder.isBuilding { ProgressView().controlSize(.small) }
+                    Spacer()
+                    if !rebuilder.hasSource {
+                        Text("build-app.sh not found here").foregroundStyle(.red).font(.callout)
+                    }
+                }
+            } header: {
+                Text("App updates")
+            } footer: {
+                Text("Builds the app from the source folder and restarts it (⌥⌘R, also in the Claude Chat menu). Needs Xcode or the Command Line Tools. If the build fails, the app stays open and shows the error.")
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Replies") {
                 Picker("Default model", selection: $store.defaultModelID) {
                     ForEach(ModelOption.all) { m in
@@ -152,7 +180,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 820)
+        .frame(width: 560, height: 900)
         .confirmationDialog("Remove the key “\(keyToRemove?.name ?? "")”?",
                             isPresented: Binding(get: { keyToRemove != nil },
                                                  set: { if !$0 { keyToRemove = nil } }),

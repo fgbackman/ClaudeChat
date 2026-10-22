@@ -47,6 +47,7 @@ struct ContentView: View {
                 .ignoresSafeArea()
             }
         }
+        .overlay(alignment: .top) { RebuildBanner() }
         .background(WindowAccessor(window: $window))
         .onChange(of: window) { applyWindowLook() }
         .onChange(of: opacity) { applyWindowLook() }
