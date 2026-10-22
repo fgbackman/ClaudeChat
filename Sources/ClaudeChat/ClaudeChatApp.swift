@@ -30,6 +30,7 @@ struct ClaudeChatApp: App {
         }
         .commands {
             ChatCommands(store: store)
+            AppearanceCommands()
         }
 
         MenuBarExtra {

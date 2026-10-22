@@ -5,10 +5,34 @@ struct SettingsView: View {
     @Environment(ChatStore.self) private var store
     @State private var keyDraft = ""
     @State private var confirmReset = false
+    @AppStorage(AppearanceKey.style) private var styleRaw = ChatStyle.standard.rawValue
+    @AppStorage(AppearanceKey.opacity) private var opacity = 1.0
 
     var body: some View {
         @Bindable var store = store
         Form {
+            Section {
+                Picker("Style", selection: $styleRaw) {
+                    ForEach(ChatStyle.allCases) { s in
+                        Text(s.label).tag(s.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                LabeledContent("See-through") {
+                    HStack {
+                        Slider(value: $opacity, in: AppearanceKey.minOpacity...1)
+                        Text("\(Int((opacity * 100).rounded()))%")
+                            .monospacedDigit()
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+            } header: {
+                Text("Appearance")
+            } footer: {
+                Text("Terminal: black background and monospaced text. See-through lowers the whole window's opacity. Shortcuts: ⌥⌘T style, ⌥⌘− / ⌥⌘= see-through.")
+                    .foregroundStyle(.secondary)
+            }
+
             Section("API key") {
                 SecureField("Paste a new key (sk-ant-…)", text: $keyDraft)
                 HStack {
@@ -69,7 +93,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 640)
+        .frame(width: 560, height: 740)
         .confirmationDialog("Reset the spending counter to $0?", isPresented: $confirmReset) {
             Button("Reset", role: .destructive) { store.totalSpent = 0 }
         }

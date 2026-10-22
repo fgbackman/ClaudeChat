@@ -7,23 +7,33 @@ struct ContentView: View {
     @Environment(ChatStore.self) private var store
     @State private var selectedID: UUID?
     @State private var window: NSWindow?
+    @AppStorage(AppearanceKey.style) private var styleRaw = ChatStyle.standard.rawValue
+    @AppStorage(AppearanceKey.opacity) private var opacity = 1.0
+
+    private var style: ChatStyle { ChatStyle(rawValue: styleRaw) ?? .standard }
 
     var body: some View {
         NavigationSplitView {
             Sidebar(selectedID: $selectedID)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 360)
         } detail: {
-            if store.apiKey.isEmpty {
-                WelcomeView()
-            } else if let id = selectedID, store.conversation(id) != nil {
-                ChatView(conversationID: id, selectedID: $selectedID)
-                    .id(id)
-            } else {
-                Text("No chat selected")
-                    .foregroundStyle(.secondary)
+            Group {
+                if store.apiKey.isEmpty {
+                    WelcomeView()
+                } else if let id = selectedID, store.conversation(id) != nil {
+                    ChatView(conversationID: id, selectedID: $selectedID)
+                        .id(id)
+                } else {
+                    Text("No chat selected")
+                        .foregroundStyle(.secondary)
+                }
             }
+            .chatStyle(style)
         }
+        .preferredColorScheme(style == .terminal ? .dark : nil)
         .background(WindowAccessor(window: $window))
+        .onChange(of: window) { applyOpacity() }
+        .onChange(of: opacity) { applyOpacity() }
         .focusedSceneValue(\.chatSelection, $selectedID)
         .onAppear {
             guard selectedID == nil else { return }
@@ -45,6 +55,13 @@ struct ContentView: View {
             // The focused tab's chat is the one the menu bar panel shows.
             if let w = note.object as? NSWindow, w === window, let id = selectedID { store.selectedID = id }
         }
+    }
+}
+
+extension ContentView {
+    /// Makes the whole window see-through (1 = solid).
+    fileprivate func applyOpacity() {
+        window?.alphaValue = min(1, max(AppearanceKey.minOpacity, opacity))
     }
 }
 
