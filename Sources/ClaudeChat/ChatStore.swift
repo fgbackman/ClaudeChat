@@ -2,13 +2,28 @@ import Foundation
 import AppKit
 import Observation
 
+/// A saved API key. Only the label and last four characters are stored here;
+/// the key itself is in the Keychain under `id`.
+struct APIKeyProfile: Codable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var suffix: String
+}
+
 @MainActor
 @Observable
 final class ChatStore {
     var conversations: [Conversation] = []
     /// The chat in the most recently focused tab; the menu bar panel follows it.
     var selectedID: UUID?
+    /// The active key's secret. Use `keyProfiles` / `activeKeyID` to manage the saved keys.
     var apiKey: String = ""
+    var keyProfiles: [APIKeyProfile] = [] {
+        didSet {
+            if let data = try? JSONEncoder().encode(keyProfiles) { defaults.set(data, forKey: "keyProfiles") }
+        }
+    }
+    var activeKeyID: String? { didSet { defaults.set(activeKeyID, forKey: "activeKeyID") } }
     /// Chats with a reply streaming in right now. Each tab can run its own.
     var streaming: Set<UUID> = []
     /// Attachments waiting in each chat's composer, and the last attachment/send problem per chat.
@@ -41,7 +56,7 @@ final class ChatStore {
         maxTokens = d.object(forKey: "maxTokens") as? Int ?? 16_000
         startingCredit = d.object(forKey: "startingCredit") as? Double ?? 100
         totalSpent = d.double(forKey: "totalSpent")
-        apiKey = Keychain.load() ?? ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? ""
+        loadKeys()
 
         load()
         // Chats left empty by closed tabs are dropped at launch.
@@ -116,10 +131,68 @@ final class ChatStore {
         save()
     }
 
-    func setAPIKey(_ key: String) {
+    // MARK: API keys
+
+    /// Adds a key (named, or "Key N" if no name is given) and makes it the active one.
+    /// An empty key removes the active one, which is what the old single-key UI expected.
+    func setAPIKey(_ key: String, name: String = "") {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if k.isEmpty { Keychain.delete() } else { Keychain.save(k) }
-        apiKey = k
+        if k.isEmpty {
+            if let id = activeKeyID { removeAPIKey(id) }
+            return
+        }
+        let id = UUID().uuidString
+        guard Keychain.save(k, account: id) else { return }
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        keyProfiles.append(APIKeyProfile(id: id,
+                                         name: n.isEmpty ? "Key \(keyProfiles.count + 1)" : n,
+                                         suffix: String(k.suffix(4))))
+        selectAPIKey(id)
+    }
+
+    func selectAPIKey(_ id: String) {
+        guard keyProfiles.contains(where: { $0.id == id }) else { return }
+        activeKeyID = id
+        refreshActiveKey()
+    }
+
+    func renameAPIKey(_ id: String, to name: String) {
+        guard let i = keyProfiles.firstIndex(where: { $0.id == id }) else { return }
+        keyProfiles[i].name = name
+    }
+
+    func removeAPIKey(_ id: String) {
+        Keychain.delete(account: id)
+        keyProfiles.removeAll { $0.id == id }
+        if activeKeyID == id { activeKeyID = keyProfiles.first?.id }
+        refreshActiveKey()
+    }
+
+    var activeKeyName: String? { keyProfiles.first { $0.id == activeKeyID }?.name }
+
+    /// `apiKey` is always the active key's secret (or the ANTHROPIC_API_KEY variable if none are saved).
+    private func refreshActiveKey() {
+        if let id = activeKeyID, let k = Keychain.load(account: id) {
+            apiKey = k
+        } else if keyProfiles.isEmpty {
+            apiKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? ""
+        } else {
+            apiKey = ""
+        }
+    }
+
+    private func loadKeys() {
+        if let data = defaults.data(forKey: "keyProfiles"),
+           let saved = try? JSONDecoder().decode([APIKeyProfile].self, from: data) {
+            keyProfiles = saved
+        }
+        // The single key saved by earlier versions becomes the first entry.
+        if keyProfiles.isEmpty, let old = Keychain.load() {
+            keyProfiles = [APIKeyProfile(id: "default", name: "Default", suffix: String(old.suffix(4)))]
+        }
+        let saved = defaults.string(forKey: "activeKeyID")
+        activeKeyID = keyProfiles.contains { $0.id == saved } ? saved : keyProfiles.first?.id
+        refreshActiveKey()
     }
 
     // MARK: Attachments waiting to be sent

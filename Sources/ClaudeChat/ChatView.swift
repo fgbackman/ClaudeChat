@@ -104,6 +104,26 @@ struct ChatView: View {
                 .fixedSize()
                 .help(model.blurb)
 
+                if store.keyProfiles.count > 1 {
+                    Menu {
+                        ForEach(store.keyProfiles) { p in
+                            Button {
+                                store.selectAPIKey(p.id)
+                            } label: {
+                                if p.id == store.activeKeyID {
+                                    Label("\(p.name)  …\(p.suffix)", systemImage: "checkmark")
+                                } else {
+                                    Text("\(p.name)  …\(p.suffix)")
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(store.activeKeyName ?? "Key", systemImage: "key")
+                    }
+                    .fixedSize()
+                    .help("API key used for new replies")
+                }
+
                 Picker("Effort", selection: $bstore.effort) {
                     ForEach(Effort.allCases) { e in
                         Text(e.label).tag(e)

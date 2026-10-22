@@ -4,6 +4,8 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(ChatStore.self) private var store
     @State private var keyDraft = ""
+    @State private var keyNameDraft = ""
+    @State private var keyToRemove: APIKeyProfile?
     @State private var confirmReset = false
     @AppStorage(AppearanceKey.style) private var styleRaw = ChatStyle.standard.rawValue
     @AppStorage(AppearanceKey.opacity) private var opacity = 1.0
@@ -48,23 +50,57 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("API key") {
-                SecureField("Paste a new key (sk-ant-…)", text: $keyDraft)
-                HStack {
-                    Button("Save Key") {
-                        store.setAPIKey(keyDraft)
-                        keyDraft = ""
-                    }
-                    .disabled(keyDraft.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Spacer()
-                    if store.apiKey.isEmpty {
-                        Text("No key saved").foregroundStyle(.secondary)
-                    } else {
-                        Text("Saved key ends in …\(String(store.apiKey.suffix(4)))")
+            Section {
+                if store.keyProfiles.isEmpty {
+                    Text(store.apiKey.isEmpty ? "No key saved" : "Using the ANTHROPIC_API_KEY environment variable")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(store.keyProfiles) { p in
+                    HStack(spacing: 8) {
+                        Button {
+                            store.selectAPIKey(p.id)
+                        } label: {
+                            Image(systemName: p.id == store.activeKeyID ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(p.id == store.activeKeyID ? Color.accentColor : .secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(p.id == store.activeKeyID ? "In use" : "Use this key")
+
+                        TextField("Name", text: Binding(
+                            get: { p.name },
+                            set: { store.renameAPIKey(p.id, to: $0) }
+                        ))
+                        .textFieldStyle(.plain)
+
+                        Text("…\(p.suffix)")
+                            .font(.callout.monospaced())
                             .foregroundStyle(.secondary)
-                        Button("Remove", role: .destructive) { store.setAPIKey("") }
+
+                        Button(role: .destructive) {
+                            keyToRemove = p
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove this key")
                     }
                 }
+                TextField("Name (optional, e.g. Work)", text: $keyNameDraft)
+                SecureField("Paste a key (sk-ant-…)", text: $keyDraft)
+                HStack {
+                    Spacer()
+                    Button("Add Key") {
+                        store.setAPIKey(keyDraft, name: keyNameDraft)
+                        keyDraft = ""
+                        keyNameDraft = ""
+                    }
+                    .disabled(keyDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            } header: {
+                Text("API keys")
+            } footer: {
+                Text("The ticked key is used for new replies. Keys are stored in your Mac's Keychain. Spending and credit are tracked across all keys together.")
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -109,6 +145,14 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 560, height: 820)
+        .confirmationDialog("Remove the key “\(keyToRemove?.name ?? "")”?",
+                            isPresented: Binding(get: { keyToRemove != nil },
+                                                 set: { if !$0 { keyToRemove = nil } }),
+                            presenting: keyToRemove) { p in
+            Button("Remove", role: .destructive) { store.removeAPIKey(p.id) }
+        } message: { _ in
+            Text("It's deleted from your Keychain. You'd need to paste it again to use it.")
+        }
         .confirmationDialog("Reset the spending counter to $0?", isPresented: $confirmReset) {
             Button("Reset", role: .destructive) { store.totalSpent = 0 }
         }
