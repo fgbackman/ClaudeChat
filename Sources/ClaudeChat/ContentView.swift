@@ -185,7 +185,7 @@ struct CreditMeter: View {
             : 0
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Credit left")
+                Text(store.keyProfiles.count > 1 ? "Credit left · \(store.activeKeyName ?? "")" : "Credit left")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()

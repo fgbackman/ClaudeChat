@@ -4,10 +4,33 @@ import Observation
 
 /// A saved API key. Only the label and last four characters are stored here;
 /// the key itself is in the Keychain under `id`.
+/// Each key also has its own credit budget and running spend estimate.
 struct APIKeyProfile: Codable, Identifiable, Equatable {
     var id: String
     var name: String
     var suffix: String
+    var startingCredit: Double = 100
+    var spent: Double = 0
+
+    var remaining: Double { startingCredit - spent }
+
+    init(id: String, name: String, suffix: String, startingCredit: Double = 100, spent: Double = 0) {
+        self.id = id
+        self.name = name
+        self.suffix = suffix
+        self.startingCredit = startingCredit
+        self.spent = spent
+    }
+
+    // Keys saved before credit was tracked per key have no budget fields.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        suffix = try c.decode(String.self, forKey: .suffix)
+        startingCredit = try c.decodeIfPresent(Double.self, forKey: .startingCredit) ?? 100
+        spent = try c.decodeIfPresent(Double.self, forKey: .spent) ?? 0
+    }
 }
 
 @MainActor
@@ -38,8 +61,31 @@ final class ChatStore {
     var useCache: Bool { didSet { defaults.set(useCache, forKey: "useCache") } }
     var systemPrompt: String { didSet { defaults.set(systemPrompt, forKey: "systemPrompt") } }
     var maxTokens: Int { didSet { defaults.set(maxTokens, forKey: "maxTokens") } }
-    var startingCredit: Double { didSet { defaults.set(startingCredit, forKey: "startingCredit") } }
-    var totalSpent: Double { didSet { defaults.set(totalSpent, forKey: "totalSpent") } }
+    /// Credit numbers used only when no saved key exists (e.g. ANTHROPIC_API_KEY from the environment),
+    /// and the source for migrating the old single counter to the first key.
+    var fallbackCredit: Double { didSet { defaults.set(fallbackCredit, forKey: "startingCredit") } }
+    var fallbackSpent: Double { didSet { defaults.set(fallbackSpent, forKey: "totalSpent") } }
+
+    // Credit tracking follows the active key.
+    private var activeIndex: Int? { keyProfiles.firstIndex { $0.id == activeKeyID } }
+
+    var startingCredit: Double {
+        get { activeIndex.map { keyProfiles[$0].startingCredit } ?? fallbackCredit }
+        set { if let i = activeIndex { keyProfiles[i].startingCredit = newValue } else { fallbackCredit = newValue } }
+    }
+    var totalSpent: Double {
+        get { activeIndex.map { keyProfiles[$0].spent } ?? fallbackSpent }
+        set { if let i = activeIndex { keyProfiles[i].spent = newValue } else { fallbackSpent = newValue } }
+    }
+
+    /// Charges a cost to the key that made the request, even if another key is active by now.
+    func addSpend(_ amount: Double, keyID: String?) {
+        if let id = keyID, let i = keyProfiles.firstIndex(where: { $0.id == id }) {
+            keyProfiles[i].spent += amount
+        } else {
+            fallbackSpent += amount
+        }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private var streamTasks: [UUID: Task<Void, Never>] = [:]
@@ -54,8 +100,8 @@ final class ChatStore {
         useCache = d.object(forKey: "useCache") as? Bool ?? true
         systemPrompt = d.string(forKey: "systemPrompt") ?? ""
         maxTokens = d.object(forKey: "maxTokens") as? Int ?? 16_000
-        startingCredit = d.object(forKey: "startingCredit") as? Double ?? 100
-        totalSpent = d.double(forKey: "totalSpent")
+        fallbackCredit = d.object(forKey: "startingCredit") as? Double ?? 100
+        fallbackSpent = d.double(forKey: "totalSpent")
         loadKeys()
 
         load()
@@ -192,6 +238,12 @@ final class ChatStore {
         }
         let saved = defaults.string(forKey: "activeKeyID")
         activeKeyID = keyProfiles.contains { $0.id == saved } ? saved : keyProfiles.first?.id
+        // One-time: the old shared budget and spend move to the key that was in use.
+        if !defaults.bool(forKey: "creditPerKeyMigrated") {
+            for i in keyProfiles.indices { keyProfiles[i].startingCredit = fallbackCredit }
+            if let i = activeIndex { keyProfiles[i].spent = fallbackSpent }
+            defaults.set(true, forKey: "creditPerKeyMigrated")
+        }
         refreshActiveKey()
     }
 
@@ -309,6 +361,7 @@ final class ChatStore {
         conversations[i].messages.append(reply)
 
         let key = apiKey
+        let keyID = activeKeyID   // spending is charged to this key, even if you switch mid-reply
         streaming.insert(cid)
         streamTasks[cid] = Task {
             var turns: [[String: Any]] = []   // this reply's assistant turns and tool results
@@ -354,7 +407,7 @@ final class ChatStore {
                     }
                     spent = spent + roundUsage
                     spentCost += model.cost(roundUsage)
-                    totalSpent += model.cost(roundUsage)
+                    addSpend(model.cost(roundUsage), keyID: keyID)
                     roundUsage = Usage()
 
                     let calls = blocks.filter { ($0["type"] as? String) == "tool_use" }
@@ -398,7 +451,7 @@ final class ChatStore {
                     update(cid, mid) { if $0.text.isEmpty && $0.toolSteps.isEmpty { $0.error = "Stopped." } }
                 }
             } catch {
-                totalSpent += model.cost(roundUsage)
+                addSpend(model.cost(roundUsage), keyID: keyID)
                 let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
                 let message = error.localizedDescription
                 update(cid, mid) { m in

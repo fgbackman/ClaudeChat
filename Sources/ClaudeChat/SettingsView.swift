@@ -99,7 +99,7 @@ struct SettingsView: View {
             } header: {
                 Text("API keys")
             } footer: {
-                Text("The ticked key is used for new replies. Keys are stored in your Mac's Keychain. Spending and credit are tracked across all keys together.")
+                Text("The ticked key is used for new replies. Keys are stored in your Mac's Keychain. Each key tracks its own credit and spending, below.")
                     .foregroundStyle(.secondary)
             }
 
@@ -108,10 +108,18 @@ struct SettingsView: View {
                 LabeledContent("Spent so far (estimate)", value: Fmt.money(store.totalSpent))
                 LabeledContent("Left", value: Fmt.money(store.remainingCredit))
                 Button("Reset Spent to $0…") { confirmReset = true }
+                if store.keyProfiles.count > 1 {
+                    ForEach(store.keyProfiles) { p in
+                        LabeledContent(p.name) {
+                            Text("\(Fmt.money(p.remaining)) left · \(Fmt.money(p.spent)) spent")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             } header: {
-                Text("Credit tracking")
+                Text(store.activeKeyName.map { "Credit tracking: \($0)" } ?? "Credit tracking")
             } footer: {
-                Text("Worked out from the token counts the API reports and the published per-token prices. The Claude Console's usage and billing pages are the real record.")
+                Text("Shows the key that's in use; with several keys, each one's balance is listed above. Worked out from the token counts the API reports and the published per-token prices. The Claude Console's usage and billing pages are the real record.")
                     .foregroundStyle(.secondary)
             }
 
@@ -153,7 +161,7 @@ struct SettingsView: View {
         } message: { _ in
             Text("It's deleted from your Keychain. You'd need to paste it again to use it.")
         }
-        .confirmationDialog("Reset the spending counter to $0?", isPresented: $confirmReset) {
+        .confirmationDialog("Reset spending to $0 for \(store.activeKeyName ?? "this key")?", isPresented: $confirmReset) {
             Button("Reset", role: .destructive) { store.totalSpent = 0 }
         }
     }
