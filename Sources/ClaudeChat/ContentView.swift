@@ -9,13 +9,18 @@ struct ContentView: View {
     @State private var window: NSWindow?
     @AppStorage(AppearanceKey.style) private var styleRaw = ChatStyle.standard.rawValue
     @AppStorage(AppearanceKey.opacity) private var opacity = 1.0
+    @AppStorage(AppearanceKey.color) private var colorRaw = TerminalColor.green.rawValue
+    @AppStorage(AppearanceKey.mode) private var modeRaw = SeeThroughMode.fade.rawValue
 
     private var style: ChatStyle { ChatStyle(rawValue: styleRaw) ?? .standard }
+    private var termColor: TerminalColor { TerminalColor(rawValue: colorRaw) ?? .green }
+    private var blur: Bool { modeRaw == SeeThroughMode.blur.rawValue }
 
     var body: some View {
         NavigationSplitView {
             Sidebar(selectedID: $selectedID)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 360)
+                .chatStyle(style, color: termColor, blur: blur)
         } detail: {
             Group {
                 if store.apiKey.isEmpty {
@@ -28,12 +33,24 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .chatStyle(style)
+            .chatStyle(style, color: termColor, blur: blur)
         }
         .preferredColorScheme(style == .terminal ? .dark : nil)
+        .background {
+            // Blur mode: a real blur of what's behind the window, tinted by the see-through slider.
+            if blur {
+                ZStack {
+                    VisualEffectBackground(material: style == .terminal ? .hudWindow : .underWindowBackground)
+                    (style == .terminal ? Color.black : Color(nsColor: .windowBackgroundColor))
+                        .opacity(opacity)
+                }
+                .ignoresSafeArea()
+            }
+        }
         .background(WindowAccessor(window: $window))
-        .onChange(of: window) { applyOpacity() }
-        .onChange(of: opacity) { applyOpacity() }
+        .onChange(of: window) { applyWindowLook() }
+        .onChange(of: opacity) { applyWindowLook() }
+        .onChange(of: modeRaw) { applyWindowLook() }
         .focusedSceneValue(\.chatSelection, $selectedID)
         .onAppear {
             guard selectedID == nil else { return }
@@ -59,9 +76,19 @@ struct ContentView: View {
 }
 
 extension ContentView {
-    /// Makes the whole window see-through (1 = solid).
-    fileprivate func applyOpacity() {
-        window?.alphaValue = min(1, max(AppearanceKey.minOpacity, opacity))
+    /// Fade mode lowers the whole window's alpha. Blur mode makes the window itself
+    /// transparent and lets the blurred background view (see `body`) do the work.
+    fileprivate func applyWindowLook() {
+        guard let w = window else { return }
+        if blur {
+            w.alphaValue = 1
+            w.isOpaque = false
+            w.backgroundColor = .clear
+        } else {
+            w.alphaValue = min(1, max(AppearanceKey.minOpacity, opacity))
+            w.isOpaque = true
+            w.backgroundColor = .windowBackgroundColor
+        }
     }
 }
 

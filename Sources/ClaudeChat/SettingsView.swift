@@ -7,6 +7,8 @@ struct SettingsView: View {
     @State private var confirmReset = false
     @AppStorage(AppearanceKey.style) private var styleRaw = ChatStyle.standard.rawValue
     @AppStorage(AppearanceKey.opacity) private var opacity = 1.0
+    @AppStorage(AppearanceKey.color) private var colorRaw = TerminalColor.green.rawValue
+    @AppStorage(AppearanceKey.mode) private var modeRaw = SeeThroughMode.fade.rawValue
 
     var body: some View {
         @Bindable var store = store
@@ -15,6 +17,19 @@ struct SettingsView: View {
                 Picker("Style", selection: $styleRaw) {
                     ForEach(ChatStyle.allCases) { s in
                         Text(s.label).tag(s.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Picker("Terminal text", selection: $colorRaw) {
+                    ForEach(TerminalColor.allCases) { c in
+                        Text(c.label).tag(c.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(styleRaw != ChatStyle.terminal.rawValue)
+                Picker("See-through by", selection: $modeRaw) {
+                    ForEach(SeeThroughMode.allCases) { m in
+                        Text(m.label).tag(m.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -29,7 +44,7 @@ struct SettingsView: View {
             } header: {
                 Text("Appearance")
             } footer: {
-                Text("Terminal: black background and monospaced text. See-through lowers the whole window's opacity. Shortcuts: ⌥⌘T style, ⌥⌘− / ⌥⌘= see-through.")
+                Text("Terminal: monospaced text in your chosen colour on black, in the chat and the sidebar. Fade lowers the whole window's opacity; Blur keeps text sharp and blurs what's behind the window. Shortcuts: ⌥⌘T style, ⌥⌘− / ⌥⌘= see-through.")
                     .foregroundStyle(.secondary)
             }
 
@@ -93,7 +108,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 740)
+        .frame(width: 560, height: 820)
         .confirmationDialog("Reset the spending counter to $0?", isPresented: $confirmReset) {
             Button("Reset", role: .destructive) { store.totalSpent = 0 }
         }

@@ -14,21 +14,78 @@ enum ChatStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// Text colour used by the terminal style.
+enum TerminalColor: String, CaseIterable, Identifiable {
+    case white, green, amber
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .white: "White"
+        case .green: "Green"
+        case .amber: "Amber"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .white: Color(white: 0.92)
+        case .green: Color(red: 0.25, green: 0.95, blue: 0.35)
+        case .amber: Color(red: 1.0, green: 0.69, blue: 0.0)
+        }
+    }
+}
+
+/// How "see-through" is done.
+enum SeeThroughMode: String, CaseIterable, Identifiable {
+    case fade, blur
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .fade: "Fade window"
+        case .blur: "Blur background"
+        }
+    }
+}
+
 enum AppearanceKey {
     static let style = "chatStyle"
+    static let color = "terminalColor"
+    static let mode = "seeThroughMode"
     static let opacity = "windowOpacity"
     static let minOpacity = 0.3
 }
 
+/// A blurred view of whatever is behind the window.
+struct VisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.blendingMode = .behindWindow
+        v.state = .active
+        v.material = material
+        return v
+    }
+
+    func updateNSView(_ v: NSVisualEffectView, context: Context) {
+        v.material = material
+    }
+}
+
 extension View {
-    /// Terminal look: dark, monospaced, black background. No-op for the standard style.
+    /// Terminal look: monospaced, coloured text, black background, hidden list backgrounds.
+    /// With `blur` on, the window supplies the background, so none is drawn here.
+    /// No-op for the standard style.
     @ViewBuilder
-    func chatStyle(_ style: ChatStyle) -> some View {
+    func chatStyle(_ style: ChatStyle, color: TerminalColor, blur: Bool) -> some View {
         if style == .terminal {
             self
                 .font(.system(.body, design: .monospaced))
-                .background(Color.black)
-                .preferredColorScheme(.dark)
+                .foregroundStyle(color.color)
+                .tint(color.color)
+                .scrollContentBackground(.hidden)
+                .background(blur ? Color.clear : Color.black)
         } else {
             self
         }
