@@ -6,11 +6,15 @@ import Observation
 @Observable
 final class ChatStore {
     var conversations: [Conversation] = []
+    /// The chat in the most recently focused tab; the menu bar panel follows it.
     var selectedID: UUID?
-    var isStreaming = false
     var apiKey: String = ""
-    var pendingAttachments: [Attachment] = []
-    var attachmentError: String?
+    /// Chats with a reply streaming in right now. Each tab can run its own.
+    var streaming: Set<UUID> = []
+    /// Attachments waiting in each chat's composer, and the last attachment/send problem per chat.
+    var pending: [UUID: [Attachment]] = [:]
+    var attachmentErrors: [UUID: String] = [:]
+    @ObservationIgnored var openedFirstWindow = false
 
     // Settings, persisted in UserDefaults
     var defaultModelID: String { didSet { defaults.set(defaultModelID, forKey: "defaultModelID") } }
@@ -23,7 +27,9 @@ final class ChatStore {
     var totalSpent: Double { didSet { defaults.set(totalSpent, forKey: "totalSpent") } }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
-    @ObservationIgnored private var streamTask: Task<Void, Never>?
+    @ObservationIgnored private var streamTasks: [UUID: Task<Void, Never>] = [:]
+    /// Tool rounds allowed in one reply before stopping, so a confused run can't spend without limit.
+    static let maxToolRounds = 60
 
     init() {
         let d = UserDefaults.standard
@@ -38,6 +44,8 @@ final class ChatStore {
         apiKey = Keychain.load() ?? ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? ""
 
         load()
+        // Chats left empty by closed tabs are dropped at launch.
+        conversations.removeAll { $0.messages.isEmpty && $0.projectPath == nil }
         if conversations.isEmpty {
             newConversation()
         } else {
@@ -50,33 +58,54 @@ final class ChatStore {
     var remainingCredit: Double { startingCredit - totalSpent }
     var sortedConversations: [Conversation] { conversations.sorted { $0.updatedAt > $1.updatedAt } }
 
+    func isStreaming(_ id: UUID?) -> Bool { id.map { streaming.contains($0) } ?? false }
+    func conversation(_ id: UUID?) -> Conversation? { id.flatMap { id in conversations.first { $0.id == id } } }
+
     private func index(of id: UUID) -> Int? {
         conversations.firstIndex { $0.id == id }
     }
 
     // MARK: Conversations
 
-    func newConversation() {
-        if let id = selectedID, let i = index(of: id), conversations[i].messages.isEmpty {
+    /// Starts a chat and returns its ID. Pass the chat a tab is showing to reuse it if it's still empty.
+    @discardableResult
+    func newConversation(replacing current: UUID? = nil) -> UUID {
+        if let id = current, let i = index(of: id), conversations[i].messages.isEmpty, !isStreaming(id) {
             conversations[i].modelID = defaultModelID
-            return   // reuse the empty chat that's already open
+            selectedID = id
+            return id   // reuse the empty chat that's already open
         }
         let c = Conversation(modelID: defaultModelID)
         conversations.append(c)
         selectedID = c.id
         save()
+        return c.id
     }
 
     func delete(_ id: UUID) {
-        if isStreaming && selectedID == id { stop() }
+        stop(id)
+        pending[id]?.forEach(AttachmentStore.delete)
+        pending[id] = nil
         if let i = index(of: id) {
             for m in conversations[i].messages {
                 m.attachments.forEach(AttachmentStore.delete)
             }
         }
         conversations.removeAll { $0.id == id }
-        if selectedID == id { selectedID = sortedConversations.first?.id }
         if conversations.isEmpty { newConversation() }
+        if selectedID == id { selectedID = sortedConversations.first?.id }
+        save()
+    }
+
+    // MARK: Projects
+
+    func setProject(_ folder: URL?, name: String?, for cid: UUID) {
+        guard let i = index(of: cid) else { return }
+        conversations[i].projectPath = folder?.path
+        conversations[i].projectName = name
+        if let name, conversations[i].messages.isEmpty, conversations[i].title == "New chat" {
+            conversations[i].title = name.split(separator: "/").last.map(String.init) ?? name
+        }
         save()
     }
 
@@ -95,88 +124,107 @@ final class ChatStore {
 
     // MARK: Attachments waiting to be sent
 
-    func addAttachments(_ urls: [URL]) {
-        attachmentError = nil
+    func addAttachments(_ urls: [URL], to cid: UUID) {
+        attachmentErrors[cid] = nil
         var problems: [String] = []
         for url in urls {
             do {
-                pendingAttachments.append(try AttachmentStore.make(from: url))
+                pending[cid, default: []].append(try AttachmentStore.make(from: url))
             } catch {
                 problems.append(error.localizedDescription)
             }
         }
-        if !problems.isEmpty { attachmentError = problems.joined(separator: "\n") }
+        if !problems.isEmpty { attachmentErrors[cid] = problems.joined(separator: "\n") }
     }
 
-    func addImage(_ image: NSImage, name: String = "Pasted image") {
-        attachmentError = nil
+    func addImage(_ image: NSImage, name: String = "Pasted image", to cid: UUID) {
+        attachmentErrors[cid] = nil
         do {
-            pendingAttachments.append(try AttachmentStore.make(fromImage: image, name: name))
+            pending[cid, default: []].append(try AttachmentStore.make(fromImage: image, name: name))
         } catch {
-            attachmentError = error.localizedDescription
+            attachmentErrors[cid] = error.localizedDescription
         }
     }
 
     /// ⌘⇧V: attach copied files or a copied image (e.g. a screenshot taken with ⌃⇧⌘4).
-    func attachFromClipboard() {
+    func attachFromClipboard(to cid: UUID) {
         let pb = NSPasteboard.general
         if let urls = pb.readObjects(forClasses: [NSURL.self],
                                      options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-            addAttachments(urls)
+            addAttachments(urls, to: cid)
         } else if let image = NSImage(pasteboard: pb) {
-            addImage(image)
+            addImage(image, to: cid)
         } else {
-            attachmentError = "There's no image or file on the clipboard."
+            attachmentErrors[cid] = "There's no image or file on the clipboard."
         }
     }
 
-    func chooseAttachments() {
+    func chooseAttachments(for cid: UUID) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.message = "Choose pictures, PDFs or text files to send to Claude"
         panel.prompt = "Attach"
-        if panel.runModal() == .OK { addAttachments(panel.urls) }
+        if panel.runModal() == .OK { addAttachments(panel.urls, to: cid) }
     }
 
-    func removePending(_ id: UUID) {
-        if let a = pendingAttachments.first(where: { $0.id == id }) { AttachmentStore.delete(a) }
-        pendingAttachments.removeAll { $0.id == id }
+    func removePending(_ id: UUID, from cid: UUID) {
+        if let a = pending[cid]?.first(where: { $0.id == id }) { AttachmentStore.delete(a) }
+        pending[cid]?.removeAll { $0.id == id }
     }
 
     // MARK: Sending
 
-    /// Sends a message. Pass `includePending: true` to send the attachments waiting in the composer.
-    func send(_ raw: String, includePending: Bool = false) {
+    /// Sends a message in chat `cid` (default: the most recently focused one).
+    /// Pass `includePending: true` to send the attachments waiting in that chat's composer.
+    func send(_ raw: String, in cid: UUID? = nil, includePending: Bool = false) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let attachments = includePending ? pendingAttachments : []
-        guard !text.isEmpty || !attachments.isEmpty, !isStreaming, !apiKey.isEmpty,
-              let cid = selectedID, let i = index(of: cid) else { return }
+        guard let cid = cid ?? selectedID, let i = index(of: cid) else { return }
+        let attachments = includePending ? (pending[cid] ?? []) : []
+        guard !text.isEmpty || !attachments.isEmpty, !isStreaming(cid), !apiKey.isEmpty else { return }
 
         let model = ModelOption.find(conversations[i].modelID)
         var history = conversations[i].messages
         history.append(ChatMessage(role: .user, text: text, attachments: attachments))
-        let request = MessageRequest(
-            model: model.id,
-            system: systemPrompt,
-            messages: Self.apiMessages(history),
-            maxTokens: maxTokens,
-            effort: effort,
-            showThinking: showThinking,
-            useCache: useCache
-        )
-        guard let body = try? JSONSerialization.data(withJSONObject: AnthropicClient.body(for: request)) else {
-            attachmentError = "Couldn't prepare the message."
+
+        // A chat linked to a project gets file tools and a note about the project.
+        var tools: ProjectTools?
+        var system = systemPrompt
+        if let root = conversations[i].projectURL {
+            guard FileManager.default.fileExists(atPath: root.path) else {
+                attachmentErrors[cid] = "The project folder \(root.path) is missing. Pick the project again from the Project menu."
+                return
+            }
+            tools = ProjectTools(root: root)
+            let note = ProjectTools.systemPrompt(name: conversations[i].projectName ?? root.lastPathComponent, root: root)
+            system = system.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? note : system + "\n\n" + note
+        }
+        let baseMessages = Self.apiMessages(history)
+        func makeBody(_ turns: [[String: Any]]) -> Data? {
+            let request = MessageRequest(
+                model: model.id,
+                system: system,
+                messages: Self.merge(baseMessages, turns),
+                maxTokens: maxTokens,
+                effort: effort,
+                showThinking: showThinking,
+                useCache: useCache,
+                tools: tools == nil ? [] : ProjectTools.definitions
+            )
+            return try? JSONSerialization.data(withJSONObject: AnthropicClient.body(for: request))
+        }
+        guard let firstBody = makeBody([]) else {
+            attachmentErrors[cid] = "Couldn't prepare the message."
             return
         }
-        guard body.count <= AnthropicClient.maxRequestBytes else {
-            attachmentError = "This chat plus its attachments is over the API's 32 MB request limit. Remove an attachment or start a new chat (⌘N)."
+        guard firstBody.count <= AnthropicClient.maxRequestBytes else {
+            attachmentErrors[cid] = "This chat plus its attachments is over the API's 32 MB request limit. Remove an attachment or start a new chat (⌘N)."
             return
         }
 
-        if includePending { pendingAttachments = [] }
-        attachmentError = nil
+        if includePending { pending[cid] = nil }
+        attachmentErrors[cid] = nil
         conversations[i].messages = history
         if conversations[i].title == "New chat" {
             conversations[i].title = Self.makeTitle(text.isEmpty ? (attachments.first?.name ?? "Attachment") : text)
@@ -188,50 +236,116 @@ final class ChatStore {
         conversations[i].messages.append(reply)
 
         let key = apiKey
-        isStreaming = true
-        streamTask = Task {
-            var usage = Usage()
+        streaming.insert(cid)
+        streamTasks[cid] = Task {
+            var turns: [[String: Any]] = []   // this reply's assistant turns and tool results
+            var spent = Usage()               // usage of finished rounds
+            var spentCost = 0.0               // and what they cost
+            var roundUsage = Usage()          // the round streaming now (billed even if stopped partway)
+            var round = 0
             do {
-                for try await event in AnthropicClient.stream(body: body, apiKey: key) {
-                    switch event {
-                    case .text(let t):
-                        update(cid, mid) { $0.text += t }
-                    case .thinking(let t):
-                        update(cid, mid) { $0.thinking += t }
-                    case .usage(let u):
-                        usage = u
-                        update(cid, mid) { $0.usage = u; $0.cost = model.cost(u) }
-                    case .stop(let reason):
-                        if reason == "max_tokens" {
-                            update(cid, mid) { $0.error = "Reply hit the max length limit. Raise it in Settings (⌘,) if you need longer answers." }
-                        } else if reason == "refusal" {
-                            update(cid, mid) { $0.error = "Claude declined to continue this reply." }
+                while true {
+                    round += 1
+                    guard let body = round == 1 ? firstBody : makeBody(turns) else {
+                        throw APIError(message: "Couldn't prepare the next request.")
+                    }
+                    var blocks: [[String: Any]] = []
+                    roundUsage = Usage()
+                    var stopReason = ""
+                    var startedText = false
+                    for try await event in AnthropicClient.stream(body: body, apiKey: key) {
+                        switch event {
+                        case .text(let t):
+                            update(cid, mid) { m in
+                                if !startedText && !m.text.isEmpty { m.text += "\n\n" }
+                                m.text += t
+                            }
+                            startedText = true
+                        case .thinking(let t):
+                            update(cid, mid) { $0.thinking += t }
+                        case .usage(let u):
+                            roundUsage = u
+                            let total = spent + u
+                            let cost = spentCost + model.cost(u)   // priced per request: long-prompt rates apply per call
+                            update(cid, mid) { $0.usage = total; $0.cost = cost }
+                        case .block(let b):
+                            blocks.append(b)
+                        case .stop(let reason):
+                            stopReason = reason
+                            if reason == "max_tokens" {
+                                update(cid, mid) { $0.error = "Reply hit the max length limit. Raise it in Settings (⌘,) if you need longer answers." }
+                            } else if reason == "refusal" {
+                                update(cid, mid) { $0.error = "Claude declined to continue this reply." }
+                            }
                         }
+                    }
+                    spent = spent + roundUsage
+                    spentCost += model.cost(roundUsage)
+                    totalSpent += model.cost(roundUsage)
+                    roundUsage = Usage()
+
+                    let calls = blocks.filter { ($0["type"] as? String) == "tool_use" }
+                    guard stopReason == "tool_use", let tools, !calls.isEmpty, !Task.isCancelled else {
+                        // Unanswered tool calls would break the next request, so drop them.
+                        let kept = blocks.filter { ($0["type"] as? String) != "tool_use" }
+                        if !kept.isEmpty { turns.append(["role": "assistant", "content": kept]) }
+                        break
+                    }
+
+                    var results: [[String: Any]] = []
+                    for call in calls {
+                        let id = (call["id"] as? String) ?? UUID().uuidString
+                        let name = (call["name"] as? String) ?? "tool"
+                        let input = (call["input"] as? [String: Any]) ?? [:]
+                        update(cid, mid) { $0.toolSteps.append(ToolStep(id: id, title: Self.stepTitle(name, input))) }
+                        let out = await tools.run(name, input)
+                        update(cid, mid) { m in
+                            if let k = m.toolSteps.firstIndex(where: { $0.id == id }) {
+                                m.toolSteps[k].title = out.title
+                                m.toolSteps[k].detail = out.detail
+                                m.toolSteps[k].isError = out.isError
+                                m.toolSteps[k].done = true
+                            }
+                        }
+                        var result: [String: Any] = ["type": "tool_result", "tool_use_id": id, "content": out.text]
+                        if out.isError { result["is_error"] = true }
+                        results.append(result)
+                    }
+                    turns.append(["role": "assistant", "content": blocks])
+                    turns.append(["role": "user", "content": results])
+                    saveTurns(turns, cid, mid)
+
+                    if Task.isCancelled { break }
+                    if round >= Self.maxToolRounds {
+                        update(cid, mid) { $0.error = "Stopped after \(Self.maxToolRounds) tool steps. Send \"continue\" to keep going." }
+                        break
                     }
                 }
                 if Task.isCancelled {
-                    update(cid, mid) { if $0.text.isEmpty { $0.error = "Stopped." } }
+                    update(cid, mid) { if $0.text.isEmpty && $0.toolSteps.isEmpty { $0.error = "Stopped." } }
                 }
             } catch {
+                totalSpent += model.cost(roundUsage)
                 let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
                 let message = error.localizedDescription
                 update(cid, mid) { m in
                     if !cancelled {
                         m.error = message
-                    } else if m.text.isEmpty {
+                    } else if m.text.isEmpty && m.toolSteps.isEmpty {
                         m.error = "Stopped."
                     }
                 }
             }
-            totalSpent += model.cost(usage)
-            isStreaming = false
-            streamTask = nil
+            if tools != nil { saveTurns(turns, cid, mid) }
+            streaming.remove(cid)
+            streamTasks[cid] = nil
             save()
         }
     }
 
-    func stop() {
-        streamTask?.cancel()
+    func stop(_ cid: UUID? = nil) {
+        guard let cid = cid ?? selectedID else { return }
+        streamTasks[cid]?.cancel()
     }
 
     private func update(_ cid: UUID, _ mid: UUID, _ change: (inout ChatMessage) -> Void) {
@@ -240,11 +354,61 @@ final class ChatStore {
         change(&conversations[i].messages[j])
     }
 
+    private func saveTurns(_ turns: [[String: Any]], _ cid: UUID, _ mid: UUID) {
+        guard !turns.isEmpty, let data = try? JSONSerialization.data(withJSONObject: turns) else { return }
+        let json = String(decoding: data, as: UTF8.self)
+        update(cid, mid) { $0.apiTurns = json }
+    }
+
+    /// What a tool step says while it runs; replaced by the tool's own title when it finishes.
+    static func stepTitle(_ name: String, _ input: [String: Any]) -> String {
+        let path = (input["path"] as? String) ?? ""
+        switch name {
+        case "read_file": return "Reading \(path)"
+        case "edit_file": return "Editing \(path)"
+        case "write_file": return "Writing \(path)"
+        case "delete_file": return "Deleting \(path)"
+        case "search": return "Searching “\((input["pattern"] as? String) ?? "")”"
+        case "list_files": return "Listing files"
+        default: return name.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    /// Appends API turns to a message list, joining neighbours that share a role
+    /// (the API needs user and assistant turns to alternate).
+    static func merge(_ base: [[String: Any]], _ extra: [[String: Any]]) -> [[String: Any]] {
+        var out = base
+        for t in extra {
+            if let last = out.last, (last["role"] as? String) == (t["role"] as? String),
+               var content = last["content"] as? [[String: Any]], let more = t["content"] as? [[String: Any]] {
+                content.append(contentsOf: more)
+                out[out.count - 1]["content"] = content
+            } else {
+                out.append(t)
+            }
+        }
+        return out
+    }
+
     /// Turns the visible chat into alternating user/assistant API messages with content blocks.
     /// Attachments go before the text of their message, which is how Claude reads them best.
     static func apiMessages(_ msgs: [ChatMessage]) -> [[String: Any]] {
         var turns: [(role: Role, blocks: [[String: Any]])] = []
         for m in msgs {
+            // A reply that used tools is sent back exactly as the API produced it, tool calls included.
+            if m.role == .assistant, let json = m.apiTurns,
+               let raw = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [[String: Any]] {
+                for t in raw {
+                    guard let role = Role(rawValue: (t["role"] as? String) ?? ""),
+                          let blocks = t["content"] as? [[String: Any]], !blocks.isEmpty else { continue }
+                    if let last = turns.last, last.role == role {
+                        turns[turns.count - 1].blocks.append(contentsOf: blocks)
+                    } else {
+                        turns.append((role: role, blocks: blocks))
+                    }
+                }
+                continue
+            }
             var blocks: [[String: Any]] = []
             if m.role == .user {
                 for a in m.attachments { blocks.append(contentsOf: AttachmentStore.blocks(for: a)) }

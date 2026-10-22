@@ -68,6 +68,13 @@ struct Usage: Codable, Hashable {
     var cacheReadTokens: Int = 0
     var cacheWriteTokens: Int = 0
     var promptTokens: Int { inputTokens + cacheReadTokens + cacheWriteTokens }
+
+    static func + (a: Usage, b: Usage) -> Usage {
+        Usage(inputTokens: a.inputTokens + b.inputTokens,
+              outputTokens: a.outputTokens + b.outputTokens,
+              cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+              cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens)
+    }
 }
 
 enum Role: String, Codable {
@@ -85,10 +92,23 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     var cost: Double? = nil
     var error: String? = nil
     var date = Date()
+    /// Project tool calls Claude made while writing this reply, shown above the text.
+    var toolSteps: [ToolStep] = []
+    /// The raw API turns (assistant blocks and tool results) of a reply that used tools, as JSON.
+    /// Sent back in place of `text` so Claude sees its own tool calls in later messages.
+    var apiTurns: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, role, text, attachments, thinking, modelID, usage, cost, error, date
+        case id, role, text, attachments, thinking, modelID, usage, cost, error, date, toolSteps, apiTurns
     }
+}
+
+struct ToolStep: Identifiable, Codable, Hashable {
+    var id: String            // the API's tool_use id
+    var title: String         // e.g. "Read Sources/App.swift"
+    var detail: String = ""   // short result or error text
+    var isError = false
+    var done = false
 }
 
 extension ChatMessage {
@@ -105,6 +125,8 @@ extension ChatMessage {
         cost = try c.decodeIfPresent(Double.self, forKey: .cost)
         error = try c.decodeIfPresent(String.self, forKey: .error)
         date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
+        toolSteps = try c.decodeIfPresent([ToolStep].self, forKey: .toolSteps) ?? []
+        apiTurns = try c.decodeIfPresent(String.self, forKey: .apiTurns)
     }
 }
 
@@ -115,6 +137,11 @@ struct Conversation: Identifiable, Codable, Hashable {
     var messages: [ChatMessage] = []
     var createdAt = Date()
     var updatedAt = Date()
+    /// Local folder of the project this chat can edit (a clone of one of your GitHub repos), if any.
+    var projectPath: String? = nil
+    var projectName: String? = nil   // e.g. "fgbackman/ClaudeChat"
+
+    var projectURL: URL? { projectPath.map { URL(fileURLWithPath: $0, isDirectory: true) } }
 
     var totalCost: Double { messages.compactMap(\.cost).reduce(0, +) }
 }

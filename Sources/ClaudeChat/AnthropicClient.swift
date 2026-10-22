@@ -5,6 +5,8 @@ enum StreamEvent {
     case thinking(String)
     case usage(Usage)
     case stop(String)
+    /// A finished content block (text, thinking or tool_use), exactly as it must be sent back to the API.
+    case block([String: Any])
 }
 
 struct APIError: LocalizedError {
@@ -20,6 +22,7 @@ struct MessageRequest {
     var effort: Effort
     var showThinking: Bool
     var useCache: Bool
+    var tools: [[String: Any]] = []
 }
 
 /// Minimal client for the Claude Messages API with server-sent-event streaming.
@@ -38,6 +41,7 @@ enum AnthropicClient {
         if !sys.isEmpty { b["system"] = sys }
         if r.effort != .auto { b["output_config"] = ["effort": r.effort.rawValue] }
         if r.showThinking { b["thinking"] = ["type": "adaptive", "display": "summarized"] }
+        if !r.tools.isEmpty { b["tools"] = r.tools }
         // Automatic prompt caching: re-sent chat history is billed at the cheap cache-read rate.
         if r.useCache { b["cache_control"] = ["type": "ephemeral"] }
         return b
@@ -67,6 +71,8 @@ enum AnthropicClient {
                     }
 
                     var usage = Usage()
+                    var blocks: [Int: [String: Any]] = [:]   // content blocks being built, by index
+                    var toolJSON: [Int: String] = [:]          // partial tool input JSON, by index
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
                         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
@@ -81,15 +87,37 @@ enum AnthropicClient {
                                 merge(u, into: &usage)
                                 continuation.yield(.usage(usage))
                             }
+                        case "content_block_start":
+                            if let i = obj["index"] as? Int, let b = obj["content_block"] as? [String: Any] {
+                                blocks[i] = b
+                            }
                         case "content_block_delta":
+                            let i = (obj["index"] as? Int) ?? 0
                             if let delta = obj["delta"] as? [String: Any] {
                                 let deltaType = (delta["type"] as? String) ?? ""
                                 if deltaType == "text_delta", let t = delta["text"] as? String {
+                                    let soFar = (blocks[i]?["text"] as? String) ?? ""
+                                    blocks[i]?["text"] = soFar + t
                                     continuation.yield(.text(t))
-                                } else if deltaType == "thinking_delta",
-                                          let t = delta["thinking"] as? String, !t.isEmpty {
-                                    continuation.yield(.thinking(t))
+                                } else if deltaType == "thinking_delta", let t = delta["thinking"] as? String {
+                                    let soFar = (blocks[i]?["thinking"] as? String) ?? ""
+                                    blocks[i]?["thinking"] = soFar + t
+                                    if !t.isEmpty { continuation.yield(.thinking(t)) }
+                                } else if deltaType == "signature_delta", let sig = delta["signature"] as? String {
+                                    blocks[i]?["signature"] = sig
+                                } else if deltaType == "input_json_delta", let j = delta["partial_json"] as? String {
+                                    toolJSON[i, default: ""] += j
                                 }
+                            }
+                        case "content_block_stop":
+                            if let i = obj["index"] as? Int, var b = blocks.removeValue(forKey: i) {
+                                if (b["type"] as? String) == "tool_use" {
+                                    let json = toolJSON.removeValue(forKey: i) ?? ""
+                                    b["input"] = json.isEmpty ? [String: Any]()
+                                        : ((try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]) ?? [:]
+                                }
+                                b.removeValue(forKey: "citations")
+                                continuation.yield(.block(b))
                             }
                         case "message_delta":
                             if let u = obj["usage"] as? [String: Any] {
@@ -104,7 +132,7 @@ enum AnthropicClient {
                             let e = obj["error"] as? [String: Any]
                             throw APIError(message: (e?["message"] as? String) ?? "The stream reported an error.")
                         default:
-                            break   // ping, content_block_start/stop, message_stop, future event types
+                            break   // ping, message_stop, future event types
                         }
                     }
                     continuation.finish()

@@ -3,8 +3,8 @@ import AppKit
 
 @MainActor
 struct MessageRow: View {
-    @Environment(ChatStore.self) private var store
     let message: ChatMessage
+    var isLive = false
 
     var body: some View {
         if message.role == .user {
@@ -37,8 +37,12 @@ struct MessageRow: View {
                     .font(.caption)
                 }
 
+                if !message.toolSteps.isEmpty {
+                    ToolStepsView(steps: message.toolSteps, isLive: isLive)
+                }
+
                 if message.text.isEmpty {
-                    if message.error == nil && store.isStreaming {
+                    if message.error == nil && isLive {
                         ProgressView()
                             .controlSize(.small)
                     }

@@ -1,25 +1,80 @@
 import SwiftUI
 import AppKit
 
+/// One window or tab. Each tab shows its own chat, so several sessions can run side by side.
 @MainActor
 struct ContentView: View {
     @Environment(ChatStore.self) private var store
+    @State private var selectedID: UUID?
+    @State private var window: NSWindow?
 
     var body: some View {
         NavigationSplitView {
-            Sidebar()
+            Sidebar(selectedID: $selectedID)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 360)
         } detail: {
             if store.apiKey.isEmpty {
                 WelcomeView()
-            } else if let id = store.selectedID {
-                ChatView(conversationID: id)
+            } else if let id = selectedID, store.conversation(id) != nil {
+                ChatView(conversationID: id, selectedID: $selectedID)
                     .id(id)
             } else {
                 Text("No chat selected")
                     .foregroundStyle(.secondary)
             }
         }
+        .background(WindowAccessor(window: $window))
+        .focusedSceneValue(\.chatSelection, $selectedID)
+        .onAppear {
+            guard selectedID == nil else { return }
+            // The first window picks up where you left off; each new tab starts a fresh chat.
+            if !store.openedFirstWindow, let id = store.selectedID ?? store.sortedConversations.first?.id {
+                selectedID = id
+            } else {
+                selectedID = store.newConversation()
+            }
+            store.openedFirstWindow = true
+        }
+        .onChange(of: selectedID) {
+            if let id = selectedID { store.selectedID = id }
+        }
+        .onChange(of: store.conversations.map(\.id)) {
+            if store.conversation(selectedID) == nil { selectedID = store.sortedConversations.first?.id }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            // The focused tab's chat is the one the menu bar panel shows.
+            if let w = note.object as? NSWindow, w === window, let id = selectedID { store.selectedID = id }
+        }
+    }
+}
+
+/// Finds the NSWindow hosting a view, and makes new chat windows open as tabs of the current one.
+struct WindowAccessor: NSViewRepresentable {
+    @Binding var window: NSWindow?
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async {
+            guard let w = v.window else { return }
+            w.tabbingMode = .preferred
+            w.tabbingIdentifier = "ClaudeChatMain"
+            window = w
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+struct ChatSelectionKey: FocusedValueKey {
+    typealias Value = Binding<UUID?>
+}
+
+extension FocusedValues {
+    /// The chat shown in the focused tab, so menu commands (⌘N, ⌘O…) act on that tab.
+    var chatSelection: Binding<UUID?>? {
+        get { self[ChatSelectionKey.self] }
+        set { self[ChatSelectionKey.self] = newValue }
     }
 }
 
@@ -28,15 +83,27 @@ struct ContentView: View {
 @MainActor
 struct Sidebar: View {
     @Environment(ChatStore.self) private var store
+    @Binding var selectedID: UUID?
 
     var body: some View {
-        @Bindable var store = store
         VStack(spacing: 0) {
-            List(selection: $store.selectedID) {
+            List(selection: $selectedID) {
                 ForEach(store.sortedConversations) { c in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(c.title)
-                            .lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text(c.title)
+                                .lineLimit(1)
+                            if store.isStreaming(c.id) {
+                                Spacer()
+                                ProgressView().controlSize(.mini)
+                            }
+                        }
+                        if let p = c.projectName {
+                            Label(p.split(separator: "/").last.map(String.init) ?? p, systemImage: "folder")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                         Text("\(ModelOption.find(c.modelID).name) · \(Fmt.money(c.totalCost))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -54,7 +121,7 @@ struct Sidebar: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    store.newConversation()
+                    selectedID = store.newConversation(replacing: selectedID)
                 } label: {
                     Label("New Chat", systemImage: "square.and.pencil")
                 }

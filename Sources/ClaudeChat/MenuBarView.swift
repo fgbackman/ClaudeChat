@@ -63,7 +63,7 @@ struct MenuBarView: View {
             HStack {
                 Button("Open Window") { showMainWindow() }
                 Button("New Chat") {
-                    store.newConversation()
+                    store.newConversation(replacing: store.selectedID)
                     focused = true
                 }
                 Spacer()
@@ -101,7 +101,7 @@ struct MenuBarView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
                         if let r = lastReply {
-                            if r.text.isEmpty && r.error == nil && store.isStreaming {
+                            if r.text.isEmpty && r.error == nil && store.isStreaming(store.selectedID) {
                                 ProgressView().controlSize(.small)
                             } else {
                                 MarkdownText(r.text)
@@ -137,7 +137,7 @@ struct MenuBarView: View {
                 .lineLimit(1...4)
                 .focused($focused)
                 .onSubmit(send)
-            if store.isStreaming {
+            if store.isStreaming(store.selectedID) {
                 Button { store.stop() } label: { Image(systemName: "stop.circle.fill") }
                     .buttonStyle(.borderless)
                     .help("Stop")
@@ -152,7 +152,7 @@ struct MenuBarView: View {
     }
 
     private func send() {
-        guard !store.isStreaming,
+        guard !store.isStreaming(store.selectedID),
               !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let text = draft
         draft = ""

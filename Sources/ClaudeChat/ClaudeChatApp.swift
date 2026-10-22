@@ -29,17 +29,7 @@ struct ClaudeChatApp: App {
                 .frame(minWidth: 760, minHeight: 520)
         }
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("New Chat") { store.newConversation() }
-                    .keyboardShortcut("n")
-                Divider()
-                Button("Attach Files…") { store.chooseAttachments() }
-                    .keyboardShortcut("o")
-            }
-            CommandGroup(after: .pasteboard) {
-                Button("Paste as Attachment") { store.attachFromClipboard() }
-                    .keyboardShortcut("v", modifiers: [.command, .shift])
-            }
+            ChatCommands(store: store)
         }
 
         MenuBarExtra {
@@ -53,6 +43,41 @@ struct ClaudeChatApp: App {
         Settings {
             SettingsView()
                 .environment(store)
+        }
+    }
+}
+
+/// File and Edit menu commands. They act on the chat in the focused tab.
+struct ChatCommands: Commands {
+    let store: ChatStore
+    @Environment(\.openWindow) private var openWindow
+    @FocusedBinding(\.chatSelection) private var selection: UUID??
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Tab") { openWindow(id: "main") }
+                .keyboardShortcut("t")
+            Button("New Chat") {
+                if selection != nil {
+                    selection = store.newConversation(replacing: selection ?? nil)
+                } else {
+                    openWindow(id: "main")
+                }
+            }
+            .keyboardShortcut("n")
+            Divider()
+            Button("Attach Files…") {
+                if let id = selection ?? nil { store.chooseAttachments(for: id) }
+            }
+            .keyboardShortcut("o")
+            .disabled((selection ?? nil) == nil)
+        }
+        CommandGroup(after: .pasteboard) {
+            Button("Paste as Attachment") {
+                if let id = selection ?? nil { store.attachFromClipboard(to: id) }
+            }
+            .keyboardShortcut("v", modifiers: [.command, .shift])
+            .disabled((selection ?? nil) == nil)
         }
     }
 }

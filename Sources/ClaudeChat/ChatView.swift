@@ -4,9 +4,12 @@ import SwiftUI
 struct ChatView: View {
     @Environment(ChatStore.self) private var store
     let conversationID: UUID
+    @Binding var selectedID: UUID?
 
     @State private var draft = ""
     @State private var dropTargeted = false
+    @State private var showProjectPicker = false
+    @State private var showCommit = false
     @FocusState private var composerFocused: Bool
 
     private var conversation: Conversation? {
@@ -24,10 +27,13 @@ struct ChatView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         if conversation?.messages.isEmpty ?? true {
-                            EmptyChatHint(model: model, effort: store.effort)
+                            EmptyChatHint(model: model, effort: store.effort, project: conversation?.projectName) {
+                                showProjectPicker = true
+                            }
                         }
                         ForEach(conversation?.messages ?? []) { m in
-                            MessageRow(message: m)
+                            MessageRow(message: m,
+                                       isLive: store.isStreaming(conversationID) && m.id == conversation?.messages.last?.id)
                                 .id(m.id)
                         }
                         Color.clear
@@ -37,6 +43,9 @@ struct ChatView: View {
                     .padding(20)
                     .frame(maxWidth: 820)
                     .frame(maxWidth: .infinity)
+                }
+                .onChange(of: conversation?.messages.last?.toolSteps.count) {
+                    proxy.scrollTo("bottom", anchor: .bottom)
                 }
                 .onChange(of: conversation?.messages.last?.text) {
                     proxy.scrollTo("bottom", anchor: .bottom)
@@ -54,16 +63,29 @@ struct ChatView: View {
         .dropDestination(for: URL.self) { urls, _ in
             let files = urls.filter(\.isFileURL)
             guard !files.isEmpty else { return false }
-            store.addAttachments(files)
+            store.addAttachments(files, to: conversationID)
             composerFocused = true
             return true
         } isTargeted: { targeted in
             dropTargeted = targeted
         }
         .navigationTitle(conversation?.title ?? "Claude")
-        .navigationSubtitle("\(model.name) · this chat \(Fmt.money(conversation?.totalCost ?? 0))")
+        .navigationSubtitle(subtitle)
+        .sheet(isPresented: $showProjectPicker) {
+            ProjectPicker(conversationID: conversationID)
+        }
+        .sheet(isPresented: $showCommit) {
+            if let root = conversation?.projectURL {
+                CommitSheet(root: root, name: conversation?.projectName ?? root.lastPathComponent)
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                ProjectMenu(conversation: conversation,
+                            pick: { showProjectPicker = true },
+                            commit: { showCommit = true },
+                            detach: { store.setProject(nil, name: nil, for: conversationID) })
+
                 Menu {
                     ForEach(ModelOption.all) { m in
                         Button {
@@ -95,20 +117,28 @@ struct ChatView: View {
         .onAppear { composerFocused = true }
     }
 
+    private var subtitle: String {
+        let cost = "\(model.name) · this chat \(Fmt.money(conversation?.totalCost ?? 0))"
+        guard let p = conversation?.projectName else { return cost }
+        return "\(p) · \(cost)"
+    }
+
+    private var pendingAttachments: [Attachment] { store.pending[conversationID] ?? [] }
+
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.pendingAttachments.isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let err = store.attachmentError {
+            if let err = store.attachmentErrors[conversationID] {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle")
                     Text(err)
                         .textSelection(.enabled)
                     Spacer()
                     Button {
-                        store.attachmentError = nil
+                        store.attachmentErrors[conversationID] = nil
                     } label: {
                         Image(systemName: "xmark")
                     }
@@ -118,12 +148,12 @@ struct ChatView: View {
                 .foregroundStyle(.red)
             }
 
-            if !store.pendingAttachments.isEmpty {
+            if !pendingAttachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(store.pendingAttachments) { a in
+                        ForEach(pendingAttachments) { a in
                             PendingAttachmentChip(attachment: a) {
-                                store.removePending(a.id)
+                                store.removePending(a.id, from: conversationID)
                             }
                         }
                     }
@@ -139,8 +169,8 @@ struct ChatView: View {
     private var composerRow: some View {
         HStack(alignment: .bottom, spacing: 10) {
             Menu {
-                Button("Choose Files…") { store.chooseAttachments() }
-                Button("Paste Image or File from Clipboard  ⌘⇧V") { store.attachFromClipboard() }
+                Button("Choose Files…") { store.chooseAttachments(for: conversationID) }
+                Button("Paste Image or File from Clipboard  ⌘⇧V") { store.attachFromClipboard(to: conversationID) }
             } label: {
                 Image(systemName: "paperclip")
                     .font(.system(size: 18))
@@ -152,7 +182,10 @@ struct ChatView: View {
             .padding(.bottom, 9)
             .help("Attach pictures, PDFs or text files (or drag them here)")
 
-            TextField("Message Claude…  (Return to send, ⌥Return for a new line)", text: $draft, axis: .vertical)
+            TextField(conversation?.projectName == nil
+                      ? "Message Claude…  (Return to send, ⌥Return for a new line)"
+                      : "Ask Claude to change something in \(conversation?.projectName ?? "")…",
+                      text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...10)
                 .focused($composerFocused)
@@ -161,9 +194,9 @@ struct ChatView: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary))
 
-            if store.isStreaming {
+            if store.isStreaming(conversationID) {
                 Button {
-                    store.stop()
+                    store.stop(conversationID)
                 } label: {
                     Image(systemName: "stop.circle.fill")
                         .font(.system(size: 26))
@@ -185,10 +218,10 @@ struct ChatView: View {
     }
 
     private func send() {
-        guard !store.isStreaming, canSend else { return }
+        guard !store.isStreaming(conversationID), canSend else { return }
         let text = draft
         draft = ""
-        store.send(text, includePending: true)
+        store.send(text, in: conversationID, includePending: true)
     }
 }
 
@@ -238,6 +271,8 @@ struct PendingAttachmentChip: View {
 struct EmptyChatHint: View {
     let model: ModelOption
     let effort: Effort
+    var project: String? = nil
+    var pickProject: () -> Void = {}
 
     var body: some View {
         // A typical short exchange: ~1,000 tokens in, ~800 out (thinking included).
@@ -255,6 +290,16 @@ struct EmptyChatHint: View {
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 460)
+            if let project {
+                Label("Working on \(project). Claude can read and edit its files; you commit and push.",
+                      systemImage: "folder")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+            } else {
+                Button("Open a GitHub Project…", systemImage: "folder.badge.plus", action: pickProject)
+                    .padding(.top, 6)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 80)
